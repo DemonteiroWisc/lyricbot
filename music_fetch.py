@@ -913,7 +913,7 @@ def main():
     """The main function to orchestrate the asset fetching workflow."""
     print("--- Starting Music Fetch Workflow ---")
     
-    used_songs_log_path = r"c:\Users\danie\Desktop\LyricBot3\assets\used_songs.json"
+    used_songs_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "used_songs.json")
     
     # 1. Find a new viral song from YouTube Music
     # In standalone mode, we'll default to not filtering by language

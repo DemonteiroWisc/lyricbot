@@ -2,7 +2,7 @@
 REM This batch file runs the LyricBot Python script.
 
 REM Change to the directory where the script is located.
-cd "C:\Users\danie\Desktop\LyricBot3"
+cd "C:\Users\danie\Desktop\LyricBot"
 
 REM Run the Python script.
 REM Make sure 'python' is in your system's PATH, or provide the full path to python.exe
