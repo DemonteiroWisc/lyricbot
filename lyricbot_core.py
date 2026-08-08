@@ -14,6 +14,7 @@ import video_generator
 import google_drive_handler
 import thumbnail
 import pipeline_logging
+import youtube_backfill
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -514,6 +515,12 @@ def run_workflow_and_exit(config):
     """
     pipeline_logging.setup_logging(config)
     logger.info("=== Run started (%s) ===", config.get('GOOGLE_DRIVE_FOLDER_SUFFIX') or config.get('ASSET_FOLDER'))
+
+    try:
+        youtube_backfill.backfill_youtube_ids(config)
+    except Exception as e:
+        print(f"  [WARNING] YouTube reconciliation step failed: {e}")
+        logger.warning("YouTube reconciliation step failed: %s", e)
 
     run_started_at    = datetime.now()
     is_sunday          = run_started_at.weekday() == 6

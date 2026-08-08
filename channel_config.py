@@ -11,6 +11,7 @@ CHANNELS = {
         "asset_folder": "1_labs_assets",
         "lower_third_filename": "sub_lower_third_labs.mov",
         "credentials_filename": "youtube_credentials_labs.json",
+        "youtube_handle": "LyricLabsOfficial",
         "playlist_id": "PLkfnDbhByBDhQP-t6dAAnL-EI54KAIN4B",
         "drive_folder_suffix": "Lyric Labs",
         "drive_folder_id": "1TiouoSPV0Oy90JpoejCvCT_l8hSjAQDL",
@@ -32,6 +33,7 @@ CHANNELS = {
         "asset_folder": "2_vivid_assets",
         "lower_third_filename": "sub_lower_third_vivid.mov",
         "credentials_filename": "youtube_credentials_vivid.json",
+        "youtube_handle": "vividmusiclyrics",
         "playlist_id": "PL0K6msmvkKYuTXwGWCOQb01Bnang4vmxG",
         "drive_folder_suffix": "Vivid Music",
         "drive_folder_id": "1z9wQ24BB-xAZ3FKp5ca6SB9Avfsedxbq",
@@ -53,6 +55,7 @@ CHANNELS = {
         "asset_folder": "3_solara_assets",
         "lower_third_filename": "sub_lower_third_solara.mov",
         "credentials_filename": "youtube_credentials_solara.json",
+        "youtube_handle": None,  # not yet provided -- reconciliation is skipped for this channel until it is
         "playlist_id": "PLu9y7VOqxCyqZrNr7NFCUcUqHIDgsOioP",
         "drive_folder_suffix": "Solara Music",
         "drive_folder_id": "1mVMqSgrHWCzloGccX6XE-xvMyVdBjT3W",
@@ -107,6 +110,7 @@ def build_config(channel: str, test_mode: bool = False) -> dict:
         "CLIENT_SECRETS_FILE": CLIENT_SECRETS_FILE,
 
         "CREDENTIALS_FILE": os.path.join(asset_folder, ch["credentials_filename"]),
+        "YOUTUBE_HANDLE": ch["youtube_handle"],
         "SCOPES": [
             "https://www.googleapis.com/auth/youtube",
             f"https://www.googleapis.com/auth/{mode['drive_scope']}",
