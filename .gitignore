@@ -24,6 +24,7 @@ higgsfield_output/
 *.mp3
 whisper_output.json
 assets/used_songs.json
+assets/used_songs.json.backup*
 
 # --- Keep small static assets used by the code ---
 !assets/*.ttf

@@ -15,7 +15,7 @@ import numpy as np
 import cv2
 from realesrgan import RealESRGANer
 from basicsr.archs.rrdbnet_arch import RRDBNet
-from datetime import datetime
+from datetime import datetime, timedelta
 import glob
 from dotenv import load_dotenv
 
@@ -181,6 +181,44 @@ def _format_all_artists(spotify_track_object):
         return artists[0]
     return "Unknown Artist"
 
+DRIVE_ONLY_COOLDOWN_DAYS = 90
+
+
+def _load_active_exclusions(used_songs_log_path):
+    """
+    Returns (used_spotify_ids, used_song_artist_pairs) for songs that should
+    still block re-selection:
+      - any song that has gone live on YouTube (a truthy 'youtube_id'), and
+      - any song logged within the last DRIVE_ONLY_COOLDOWN_DAYS days, even
+        if it's Drive-only so far -- publishing from Drive to YouTube is a
+        manual step that can take a while, so a fresh Drive-only upload
+        shouldn't be immediately eligible for re-selection. Once the
+        cooldown passes without it going live, the slot opens back up.
+    """
+    try:
+        with open(used_songs_log_path, 'r') as f:
+            used_songs_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set(), set()
+
+    cutoff = datetime.now() - timedelta(days=DRIVE_ONLY_COOLDOWN_DAYS)
+
+    def _still_active(song):
+        if song.get('youtube_id'):
+            return True
+        try:
+            return datetime.fromisoformat(song['date_added']) >= cutoff
+        except (KeyError, ValueError, TypeError):
+            # Can't tell how old the entry is -- err on the side of not
+            # re-picking it rather than risking a duplicate.
+            return True
+
+    active = [song for song in used_songs_data if _still_active(song)]
+    used_spotify_ids = {song['spotify_id'] for song in active if 'spotify_id' in song}
+    used_song_artist_pairs = {(song['song_name'].lower(), song['artist_name'].lower()) for song in active}
+    return used_spotify_ids, used_song_artist_pairs
+
+
 def get_viral_ytmusic_song(used_songs_log_path, only_find_english_songs=False):
     """
     Fetches tracks from YT Music, performs a biased random selection, and *then*
@@ -198,20 +236,14 @@ def get_viral_ytmusic_song(used_songs_log_path, only_find_english_songs=False):
     TRACKS_TO_FETCH_PER_LIST = 25 # Keep this low for speed, 25 is a good balance.
     MAX_SEARCH_ATTEMPTS = 20 # Safety net to prevent an infinite loop.
 
-    # --- Load used songs from log ---
-    try:
-        with open(used_songs_log_path, 'r') as f:
-            used_songs_data = json.load(f)
-            # --- MODIFICATION START ---
-            used_spotify_ids = {song['spotify_id'] for song in used_songs_data if 'spotify_id' in song}
-            used_song_artist_pairs = {(song['song_name'].lower(), song['artist_name'].lower()) for song in used_songs_data}
-            print(f"  Loaded {len(used_spotify_ids)} IDs and {len(used_song_artist_pairs)} name/artist pairs from the log.")
-            # --- MODIFICATION END ---
-    except (FileNotFoundError, json.JSONDecodeError):
-        used_spotify_ids = set()
-        # --- MODIFICATION ---
-        used_song_artist_pairs = set()
-        print("  No previous song log found, or it's empty. Starting fresh.")
+    # --- Load used songs from log (YouTube-published songs are excluded
+    # permanently; Drive-only songs are excluded for a cooldown period to
+    # give the manual Drive-to-YouTube publish step time to happen) ---
+    used_spotify_ids, used_song_artist_pairs = _load_active_exclusions(used_songs_log_path)
+    if used_spotify_ids or used_song_artist_pairs:
+        print(f"  Loaded {len(used_spotify_ids)} IDs and {len(used_song_artist_pairs)} name/artist pairs from the log (published, or within the {DRIVE_ONLY_COOLDOWN_DAYS}-day cooldown).")
+    else:
+        print("  No active exclusions found in the log. Starting fresh.")
 
     # --- Step 1: Quickly gather all potential tracks without checking them ---
     all_tracks = []
@@ -322,19 +354,11 @@ def get_viral_ytmusic_song(used_songs_log_path, only_find_english_songs=False):
 
 def get_viral_billboard_song(used_songs_log_path, only_find_english_songs=False):
     print("--- Finding a Trending Song from Billboard Hot 100 ---")
-    try:
-        with open(used_songs_log_path, 'r') as f:
-            used_songs_data = json.load(f)
-            # --- MODIFICATION START ---
-            used_spotify_ids = {song['spotify_id'] for song in used_songs_data if 'spotify_id' in song}
-            used_song_artist_pairs = {(song['song_name'].lower(), song['artist_name'].lower()) for song in used_songs_data}
-            print(f"  Loaded {len(used_spotify_ids)} IDs and {len(used_song_artist_pairs)} name/artist pairs from the log.")
-            # --- MODIFICATION END ---
-    except (FileNotFoundError, json.JSONDecodeError):
-        used_spotify_ids = set()
-        # --- MODIFICATION ---
-        used_song_artist_pairs = set()
-        print("  No previous song log found, or it's empty. Starting fresh.")
+    used_spotify_ids, used_song_artist_pairs = _load_active_exclusions(used_songs_log_path)
+    if used_spotify_ids or used_song_artist_pairs:
+        print(f"  Loaded {len(used_spotify_ids)} IDs and {len(used_song_artist_pairs)} name/artist pairs from the log (published, or within the {DRIVE_ONLY_COOLDOWN_DAYS}-day cooldown).")
+    else:
+        print("  No active exclusions found in the log. Starting fresh.")
 
     try:
         print("  Fetching current Billboard Hot 100 chart...")
@@ -478,7 +502,7 @@ def fetch_all_assets(song_info, num_audio_to_download=2, asset_folder="test_asse
     background_output_path = os.path.join(asset_folder, "test_background.jpg")
 
     # Download audio first
-    downloaded_audio_paths = download_song_audio(audio_search_term, asset_folder, num_to_download=num_audio_to_download)
+    downloaded_audio_paths = download_song_audio(audio_search_term, asset_folder, num_to_download=num_audio_to_download, is_explicit=is_explicit)
     audio_success = len(downloaded_audio_paths) > 0
 
     print(f"\nSearching for lyrics for '{song_name}'...")
@@ -702,52 +726,155 @@ def get_album_tracks_from_spotify(album_url, client_id, client_secret):
         print("  Please check if the album URL is correct and public.")
         return []
 
-def download_song_audio(search_term, asset_folder, output_base_name="test_song", num_to_download=2, start_index=1):
+# --- Explicit-audio bias for YouTube search results ---
+# A plain YouTube search often ranks a heavily-viewed "clean"/radio-edit
+# upload above the actual explicit version, and the search query itself
+# gives yt-dlp no signal either way. When is_explicit is True, these help
+# search a larger pool and prefer results that actually look explicit.
+CLEAN_TITLE_MARKERS = ('clean', 'radio edit', 'radio version', 'censored', 'edited version')
+EXPLICIT_TITLE_MARKERS = ('explicit', 'uncensored')
+EXPLICIT_SEARCH_POOL_SIZE = 10
+
+
+def _rank_for_explicit(entries):
+    """
+    Reorders yt-dlp search-result entries (dicts with 'title') so titles
+    explicitly marked clean/radio-edit/censored sort last, and titles
+    explicitly marked explicit/uncensored sort first. Entries with no
+    marker either way keep their original relative (YouTube-ranked) order.
+    """
+    def score(entry):
+        title = (entry.get('title') or '').lower()
+        # Check explicit markers first: "uncensored" contains "censored" as a
+        # substring, so checking clean markers first would misclassify it.
+        if any(marker in title for marker in EXPLICIT_TITLE_MARKERS):
+            return 0
+        if any(marker in title for marker in CLEAN_TITLE_MARKERS):
+            return 2
+        return 1
+    return sorted(entries, key=score)
+
+
+def _search_youtube_pool(search_term, pool_size):
+    """Search-only (no download) lookup of the top `pool_size` YouTube results."""
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'default_search': f'ytsearch{pool_size}',
+        'noplaylist': True,
+        'extract_flat': 'in_playlist',
+        'extractor_args': {'youtube': {'player_js_version': 'actual'}},
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(search_term, download=False)
+    return info.get('entries') or []
+
+
+def _select_explicit_biased_urls(search_term, num_to_download, start_index):
+    """
+    Searches a larger pool of YouTube results (first with "(Explicit)"
+    appended to the query, falling back to the plain term if that doesn't
+    turn up enough candidates), reorders them via _rank_for_explicit, and
+    returns the URLs for the requested range.
+
+    Mirrors the range semantics of the plain playlist_items_spec logic in
+    download_song_audio, where num_to_download is actually the END index of
+    an inclusive [start_index, num_to_download] range rather than a count
+    (e.g. the fallback caller passes start_index == num_to_download == 3 to
+    mean "just item #3", not "3 items starting at #3").
+
+    Returns an empty list -- signalling the caller to fall back to the
+    plain top-N search -- if the pool search fails, turns up nothing, or
+    can't fill the full requested range (a partial list would otherwise
+    silently under-deliver rather than falling back).
+    """
+    range_end = num_to_download if start_index <= num_to_download else start_index
+    count = range_end - start_index + 1
+    pool_size = max(EXPLICIT_SEARCH_POOL_SIZE, range_end)
+    try:
+        entries = _search_youtube_pool(f"{search_term} (Explicit)", pool_size)
+        if len(entries) < range_end:
+            entries = _search_youtube_pool(search_term, pool_size)
+        if not entries:
+            return []
+        ranked = _rank_for_explicit(entries)
+        selected = ranked[start_index - 1: start_index - 1 + count]
+        urls = [e['url'] for e in selected if e.get('url')]
+        return urls if len(urls) == count else []
+    except Exception as e:
+        # Covers the search calls AND the ranking/selection logic below them --
+        # this must never raise, since the caller relies on an empty list (not
+        # an exception) to fall back to the plain top-N search.
+        print(f"  -> [WARNING] Explicit-biased search failed, falling back to plain search: {e}")
+        return []
+
+
+def download_song_audio(search_term, asset_folder, output_base_name="test_song", num_to_download=2, start_index=1, is_explicit=False):
     """
     Downloads the top N YouTube search results for a song as MP3 files.
     Retries once after a 5-minute pause if the first attempt fails.
     Can specify a start_index to download a specific range of results.
+
+    When is_explicit is True, searches a larger pool of results and biases
+    toward titles that look explicit/uncensored and away from titles that
+    look clean/radio-edited (see _select_explicit_biased_urls), instead of
+    just taking YouTube's plain top-N ranking.
     """
     MAX_ATTEMPTS = 3
     for attempt in range(1, MAX_ATTEMPTS + 1):
         # Adjust log message based on whether we're downloading a range or a single item
         if start_index > 1:
             print(f"\nDownloading audio candidate #{start_index} for '{search_term}' from YouTube... (Attempt {attempt}/{MAX_ATTEMPTS})")
-            search_query = f'ytsearch{start_index}' # Search for the top N to get the Nth item
         else:
             print(f"\nDownloading top {num_to_download} audio candidate(s) for '{search_term}' from YouTube... (Attempt {attempt}/{MAX_ATTEMPTS})")
-            search_query = f'ytsearch{num_to_download}'
-        
-        # This tells yt-dlp which items from the search results to download (e.g., 1-2, or just 3)
-        playlist_items_spec = f"{start_index}-{num_to_download}" if start_index <= num_to_download else str(start_index)
 
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'default_search': search_query,
-            'outtmpl': os.path.join(asset_folder, f'{output_base_name}_v%(playlist_index)s.%(ext)s'), # <-- Note the added .%(ext)s
-            'noplaylist': True,
-            'playlist_items': playlist_items_spec,
-            # ==============================================================================
-            # --- TEMPORARY FIX for YouTube 403 Errors (October 2024) ---
-            # This forces yt-dlp to use the "actual" player version, bypassing some
-            # of YouTube's recent download restrictions.
-            # REMOVE THIS once yt-dlp releases a permanent fix.
-            # See: https://github.com/yt-dlp/yt-dlp/issues/14680
-            'extractor_args': {
-                'youtube': {
-                    'player_js_version': 'actual'
-                }
-            }
-            # --- END OF TEMPORARY FIX ---
-            # ==============================================================================
-        }
+        explicit_urls = []
+        if is_explicit:
+            print("  -> Song is explicit. Searching a wider pool and biasing toward explicit/uncensored uploads.")
+            explicit_urls = _select_explicit_biased_urls(search_term, num_to_download, start_index)
+
+        # --- TEMPORARY FIX for YouTube 403 Errors (October 2024) ---
+        # This forces yt-dlp to use the "actual" player version, bypassing some
+        # of YouTube's recent download restrictions.
+        # REMOVE THIS once yt-dlp releases a permanent fix.
+        # See: https://github.com/yt-dlp/yt-dlp/issues/14680
+        extractor_args = {'youtube': {'player_js_version': 'actual'}}
 
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([search_term])
-            
+            if explicit_urls:
+                for offset, url in enumerate(explicit_urls):
+                    index = start_index + offset
+                    ydl_opts = {
+                        'format': 'bestaudio/best',
+                        'outtmpl': os.path.join(asset_folder, f'{output_base_name}_v{index}.%(ext)s'),
+                        'noplaylist': True,
+                        'extractor_args': extractor_args,
+                    }
+                    try:
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            ydl.download([url])
+                    except Exception as inner_e:
+                        # Don't let one bad URL (e.g. removed/region-locked)
+                        # discard candidates already downloaded earlier in
+                        # this same loop -- keep going and let the
+                        # downloaded_paths check below decide success.
+                        print(f"  -> [WARNING] Failed to download explicit-biased candidate #{index}: {inner_e}")
+            else:
+                search_query = f'ytsearch{start_index}' if start_index > 1 else f'ytsearch{num_to_download}' # Search for the top N to get the Nth item
+                # This tells yt-dlp which items from the search results to download (e.g., 1-2, or just 3)
+                playlist_items_spec = f"{start_index}-{num_to_download}" if start_index <= num_to_download else str(start_index)
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'default_search': search_query,
+                    'outtmpl': os.path.join(asset_folder, f'{output_base_name}_v%(playlist_index)s.%(ext)s'), # <-- Note the added .%(ext)s
+                    'noplaylist': True,
+                    'playlist_items': playlist_items_spec,
+                    'extractor_args': extractor_args,
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([search_term])
+
             downloaded_paths = glob.glob(os.path.join(asset_folder, f"{output_base_name}_v*.*"))
-            
+
             if len(downloaded_paths) > 0:
                 print(f"  -> Successfully downloaded {len(downloaded_paths)} audio file(s).")
                 return downloaded_paths
@@ -777,7 +904,7 @@ def prepare_media_assets(song_info, asset_folder):
     background_output_path = os.path.join(asset_folder, "test_background.jpg")
 
     # 1. Download Audio
-    audio_success = len(download_song_audio(search_term, asset_folder)) > 0
+    audio_success = len(download_song_audio(search_term, asset_folder, is_explicit=song_info.get('is_explicit', False))) > 0
 
     # 2. Generate or confirm Background
     background_success = False
@@ -868,7 +995,21 @@ def generate_background_image(output_path):
     return False
 
 def log_used_song(song_info, youtube_video_id, used_songs_log_path):
-    """Logs a song with comprehensive details, adding it to the top of the file."""
+    """
+    Logs a song with comprehensive details, adding it to the top of the file.
+    If the song is already in the log:
+      - and this call now provides a youtube_id it didn't have before, the
+        entry is updated in place to record that it has gone live on
+        YouTube, rather than being skipped as a duplicate.
+      - and it's still Drive-only (no youtube_id either before or now), its
+        date_added is refreshed to restart the DRIVE_ONLY_COOLDOWN_DAYS
+        cooldown -- this is a fresh Drive upload of the same song after its
+        previous cooldown expired, so the timer should restart rather than
+        staying stuck at the original date and letting it be re-picked
+        again on every subsequent run.
+    In both update cases the entry is moved back to the top of the list,
+    preserving the "most recent activity first" ordering.
+    """
     print("\n--- Logging Used Song ---")
     try:
         with open(used_songs_log_path, 'r') as f:
@@ -879,9 +1020,26 @@ def log_used_song(song_info, youtube_video_id, used_songs_log_path):
     # Use .get() for safety, providing a default value of None if the key is missing
     spotify_id = song_info.get('spotify_id')
 
-    # Final duplicate check using Spotify ID before writing, only if the ID exists
-    if spotify_id and any(s.get('spotify_id') == spotify_id for s in used_songs_data):
-        print(f"  Song with Spotify ID '{spotify_id}' was already in the log.")
+    existing_entry = next((s for s in used_songs_data if spotify_id and s.get('spotify_id') == spotify_id), None)
+    if existing_entry:
+        if youtube_video_id and not existing_entry.get('youtube_id'):
+            existing_entry['youtube_id'] = youtube_video_id
+            existing_entry['youtube_url'] = f"https://www.youtube.com/watch?v={youtube_video_id}"
+            existing_entry['date_added'] = datetime.now().isoformat(timespec='seconds')
+            used_songs_data.remove(existing_entry)
+            used_songs_data.insert(0, existing_entry)
+            with open(used_songs_log_path, 'w') as f:
+                json.dump(used_songs_data, f, indent=4)
+            print(f"  Song with Spotify ID '{spotify_id}' was already in the log (Drive-only) — updated it: now live on YouTube.")
+        elif not existing_entry.get('youtube_id'):
+            existing_entry['date_added'] = datetime.now().isoformat(timespec='seconds')
+            used_songs_data.remove(existing_entry)
+            used_songs_data.insert(0, existing_entry)
+            with open(used_songs_log_path, 'w') as f:
+                json.dump(used_songs_data, f, indent=4)
+            print(f"  Song with Spotify ID '{spotify_id}' was already in the log (Drive-only) — refreshed its cooldown timer.")
+        else:
+            print(f"  Song with Spotify ID '{spotify_id}' was already in the log.")
         return
 
     # Create the new, comprehensive log entry using .get() for all fields

@@ -477,6 +477,18 @@ def _finish_and_upload_song(config, song_info, best_overall_result, background_i
             print(f"  [WARNING] Upload succeeded but failed to log the song as used: {e}")
             logger.warning("Upload succeeded but log_used_song failed: %s", e)
 
+        # The video is now safely stored on Drive/YouTube -- delete the local
+        # copy so successfully-uploaded videos don't pile up in the asset
+        # folder indefinitely.
+        try:
+            if os.path.exists(final_video_path):
+                os.remove(final_video_path)
+                print(f"  -> Deleted local video file after successful upload: {os.path.basename(final_video_path)}")
+                logger.info("Deleted local video file after successful upload: %s", os.path.basename(final_video_path))
+        except OSError as e:
+            print(f"  [WARNING] Could not delete local video file after upload: {e}")
+            logger.warning("Could not delete local video file after upload: %s", e)
+
     # --- Add to playlist only if it was a successful YouTube upload ---
     if youtube_video_id:
         add_video_to_playlist(youtube_service, youtube_video_id, config['YOUTUBE_PLAYLIST_ID'])
@@ -652,7 +664,7 @@ def run_workflow(config):
                 
                 # --- FIX: Only download audio and lyrics. Defer background generation. ---
                 music_fetch.GENERATE_NEW_BACKGROUND = False # Temporarily disable
-                audio_paths = music_fetch.download_song_audio(f"{song_info['name']} {song_info['artist']}", config['ASSET_FOLDER'], num_to_download=config['NUM_AUDIO_CANDIDATES'])
+                audio_paths = music_fetch.download_song_audio(f"{song_info['name']} {song_info['artist']}", config['ASSET_FOLDER'], num_to_download=config['NUM_AUDIO_CANDIDATES'], is_explicit=song_info.get('is_explicit', False))
                 lrc_paths = [local_lrc_path] if audio_paths else []
             else:
                  # --- FIX: Defer background generation until after quality check ---
@@ -720,7 +732,8 @@ def run_workflow(config):
                     f"{song_info['name']} {song_info['artist']}",
                     config['ASSET_FOLDER'],
                     num_to_download=next_audio_index,
-                    start_index=next_audio_index
+                    start_index=next_audio_index,
+                    is_explicit=song_info.get('is_explicit', False)
                 )
 
                 if fallback_audio_paths:

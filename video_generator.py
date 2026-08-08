@@ -151,7 +151,7 @@ def is_lrc_explicit(lrc_file_path):
     Checks if the content of an LRC file contains common explicit words.
     """
     # A basic list of words to check for. You can expand this list.
-    EXPLICIT_KEYWORDS = {'fuck', 'shit', 'bitch', 'cunt', 'asshole', 'ass', 'dick', 'pussy', 'cock', 'nigger', 'faggot'}
+    EXPLICIT_KEYWORDS = {'fuck', 'shit', 'bitch', 'cunt', 'asshole', 'ass', 'dick', 'pussy', 'cock', 'nigger', 'nigga', 'faggot', 'whore', 'slut', 'twat', 'bastard'}
     try:
         # Use utf-8-sig to correctly handle a potential Byte Order Mark (BOM)
         with open(lrc_file_path, 'r', encoding='utf-8-sig') as f:
