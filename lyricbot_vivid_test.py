@@ -35,9 +35,10 @@ def main():
         # --- YouTube Upload Configuration ---
         "CREDENTIALS_FILE": os.path.join(ASSET_FOLDER, 'youtube_credentials_vivid.json'),
         "SCOPES": ['https://www.googleapis.com/auth/youtube', 'https://www.googleapis.com/auth/drive.file'],
-        "YOUTUBE_PLAYLIST_ID": "PLu9y7VOqxCyqZrNr7NFCUcUqHIDgsOioP",
+        "YOUTUBE_PLAYLIST_ID": "PL0K6msmvkKYuTXwGWCOQb01Bnang4vmxG",
         "UPLOAD_TO_YOUTUBE": False,
         "UPLOAD_TO_GOOGLE_DRIVE": True, # Set to True to enable Drive upload
+        "GOOGLE_DRIVE_FOLDER_SUFFIX": "Vivid Music", # Suffix for the Google Drive folder name
         "GOOGLE_DRIVE_FOLDER_ID": "1z9wQ24BB-xAZ3FKp5ca6SB9Avfsedxbq", # The ID of the parent folder in Drive for Vivid
         
         # --- Output File Names ---

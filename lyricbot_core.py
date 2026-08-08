@@ -18,7 +18,6 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaFileUpload
 
 def get_authenticated_service(credentials_file, client_secrets_file, scopes, service_name, service_version):
     """
@@ -567,7 +566,7 @@ def run_workflow(config):
             youtube_video_id = None # Initialize to None
             if config['UPLOAD_TO_YOUTUBE']:
                 print("\nSTEP E: Uploading video to YouTube...")
-                if i == 0: schedule_start_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+                if schedule_start_time is None: schedule_start_time = datetime.now(timezone.utc) + timedelta(minutes=5)
                 publish_time = schedule_start_time + timedelta(minutes=i * 30)
                 
                 youtube_service = get_authenticated_service(

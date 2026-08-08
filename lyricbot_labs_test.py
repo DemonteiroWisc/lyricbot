@@ -38,6 +38,7 @@ def main():
         "YOUTUBE_PLAYLIST_ID": "PLkfnDbhByBDhQP-t6dAAnL-EI54KAIN4B",
         "UPLOAD_TO_YOUTUBE": False,
         "UPLOAD_TO_GOOGLE_DRIVE": True, # Set to True to enable Drive upload
+        "GOOGLE_DRIVE_FOLDER_SUFFIX": "Lyric Labs", # Suffix for the Google Drive folder name
         "GOOGLE_DRIVE_FOLDER_ID": "1TiouoSPV0Oy90JpoejCvCT_l8hSjAQDL", # The ID of the parent folder in Drive for Labs
         
         # --- Output File Names ---

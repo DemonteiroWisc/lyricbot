@@ -38,7 +38,8 @@ def main():
         "YOUTUBE_PLAYLIST_ID": "PLu9y7VOqxCyqZrNr7NFCUcUqHIDgsOioP",
         "UPLOAD_TO_YOUTUBE": False,
         "UPLOAD_TO_GOOGLE_DRIVE": False, # Set to True to enable Drive upload
-        "GOOGLE_DRIVE_FOLDER_ID": "1mVMqSgrHWCzloGccX6XE-xvMyVdBjT3W", # The ID of the parent folder in Drive for Vivid
+        "GOOGLE_DRIVE_FOLDER_SUFFIX": "Solara Music", # Suffix for the Google Drive folder name
+        "GOOGLE_DRIVE_FOLDER_ID": "1mVMqSgrHWCzloGccX6XE-xvMyVdBjT3W", # The ID of the parent folder in Drive for Solara
         
         # --- Output File Names ---
         "VIDEO_FILE": os.path.join(ASSET_FOLDER, 'lyric_video_FINAL.mp4'),

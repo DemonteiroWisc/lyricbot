@@ -23,13 +23,9 @@ load_dotenv()
 
 # --- CONFIGURATION ---
 GENERATE_NEW_BACKGROUND = True
-HUGGINGFACE_API_TOKEN = os.environ.get("HUGGINGFACE_API_TOKEN") # No longer used
 LEONARDO_API_KEY = os.environ.get("LEONARDO_API_KEY")
 
 BLACKLISTED_ARTISTS = ["Taylor Swift"]
-
-MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
-API_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}" # No longer used
 
 # --- AUTHENTICATION CONFIG ---
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
@@ -826,14 +822,14 @@ def generate_background_image(output_path):
             max_wait_time = 180; poll_interval = 10; start_time = time.time(); image_generated = False
             while time.time() - start_time < max_wait_time:
                 print("  -> Checking job status...")
-                response = requests.get(get_job_url, headers=headers); response.raise_for_status()
+                response = requests.get(get_job_url, headers=headers, timeout=30); response.raise_for_status()
                 job_data = response.json().get('generations_by_pk', {}); job_status = job_data.get('status')
                 if job_status == 'COMPLETE':
                     print("  -> Generation COMPLETE.")
                     images = job_data.get('generated_images', [])
                     if images:
                         image_url = images[0]['url']; print("  -> Downloading final image...")
-                        image_response = requests.get(image_url)
+                        image_response = requests.get(image_url, timeout=30)
                         if image_response.status_code == 200:
                             with open(output_path, "wb") as f: f.write(image_response.content)
                             print(f"  -> Successfully saved base image to '{output_path}'")
@@ -931,8 +927,7 @@ def main():
         return
 
     # 3. If everything was successful, log the song so we don't use it again
-    song_key = f"{song_info['name']} by {song_info['artist']}"
-    log_used_song(song_key, used_songs_log_path)
+    log_used_song(song_info, None, used_songs_log_path)
 
     print("\n--- Workflow Complete ---")
     print(f"Assets are ready in the 'test_assets' folder.")
