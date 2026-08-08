@@ -1,0 +1,30 @@
+# --- Secrets & credentials ---
+.env
+.cache
+assets/client_secrets.json
+*/youtube_credentials_*.json
+youtube_credentials_*.json
+
+# --- Python ---
+__pycache__/
+*.pyc
+tempCodeRunnerFile.py
+
+# --- Generated video/audio output & large binary media ---
+# These are pipeline outputs and reference assets, not source code.
+# Keeping them out of git avoids GitHub's 100MB file cap and repo bloat.
+1_labs_assets/
+2_vivid_assets/
+3_solara_assets/
+higgsfield_output/
+*.mp4
+*.mov
+*.webm
+*.wav
+*.mp3
+whisper_output.json
+assets/used_songs.json
+
+# --- Keep small static assets used by the code ---
+!assets/*.ttf
+!assets/update_ytdlp.bat
