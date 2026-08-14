@@ -27,6 +27,28 @@ LEONARDO_API_KEY = os.environ.get("LEONARDO_API_KEY")
 
 BLACKLISTED_ARTISTS = ["Taylor Swift"]
 
+# Title fragments that mark a track as a non-standard variant (slowed,
+# sped-up, live performance, DJ mix, remix, etc). These almost never have
+# matching lyrics on Lrclib/Musixmatch (which index the original release),
+# and even when audio is found the vocals/timing drift from the official
+# lyrics, so the whisper alignment quality check fails them anyway. Skipping
+# them here -- before any Spotify/Lrclib/YouTube call is made -- avoids
+# burning a quality-check attempt (and the API calls that come with it) on a
+# candidate that was essentially never going to pass.
+LOW_QUALITY_VARIANT_PATTERNS = [
+    r'\bslowed\b', r'\bsped[\s-]?up\b', r'\breverb\b', r'\bnightcore\b',
+    r'\b8d\s*audio\b', r'\bkaraoke\b', r'\binstrumental\b', r'\bacapella\b',
+    r'\bremix\b', r'\bmashup\b', r'\bcover\b', r'\bacoustic\b',
+    r'\blive\b', r'\bperformance\b', r'\bsession\b', r'\ba colors show\b',
+    r'\btiny desk\b', r'\bdj\s',
+]
+_LOW_QUALITY_VARIANT_RE = re.compile('|'.join(LOW_QUALITY_VARIANT_PATTERNS), re.IGNORECASE)
+
+
+def _is_low_quality_variant(title, artist):
+    text = f"{title} {artist}"
+    return bool(_LOW_QUALITY_VARIANT_RE.search(text))
+
 # --- AUTHENTICATION CONFIG ---
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET")
@@ -295,7 +317,11 @@ def get_viral_ytmusic_song(used_songs_log_path, only_find_english_songs=False):
         yt_title = chosen_track.get('title')
         yt_artist = chosen_track['artists'][0]['name'] if chosen_track.get('artists') else 'Unknown'
         cleaned_title = clean_youtube_title(yt_title)
-        
+
+        if _is_low_quality_variant(cleaned_title, yt_artist):
+            print(f"    -> Skipping likely low-quality variant: '{cleaned_title}' by '{yt_artist}'.")
+            continue
+
         print(f"    -> Selected '{cleaned_title}' by '{yt_artist}'. Checking Spotify...")
 
         # Now perform the single, targeted Spotify search
