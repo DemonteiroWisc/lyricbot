@@ -205,17 +205,28 @@ def _format_all_artists(spotify_track_object):
 
 DRIVE_ONLY_COOLDOWN_DAYS = 90
 
+# Candidates that were picked but never made it to upload -- quality check
+# failed, or audio/lyrics couldn't be found -- get excluded for a much
+# shorter window than a real Drive-only upload. This is what stops the same
+# bad candidate from being immediately re-picked later in the same run, or
+# resurfacing on the very next day's run, while still letting it come back
+# into rotation soon in case the underlying problem (a bad audio match, a
+# missing lyrics source) was transient.
+FAILED_SONG_COOLDOWN_DAYS = 3
+
 
 def _load_active_exclusions(used_songs_log_path):
     """
     Returns (used_spotify_ids, used_song_artist_pairs) for songs that should
     still block re-selection:
-      - any song that has gone live on YouTube (a truthy 'youtube_id'), and
+      - any song that has gone live on YouTube (a truthy 'youtube_id'),
       - any song logged within the last DRIVE_ONLY_COOLDOWN_DAYS days, even
         if it's Drive-only so far -- publishing from Drive to YouTube is a
         manual step that can take a while, so a fresh Drive-only upload
         shouldn't be immediately eligible for re-selection. Once the
-        cooldown passes without it going live, the slot opens back up.
+        cooldown passes without it going live, the slot opens back up, and
+      - any song logged as failed/skipped (see log_failed_song) within the
+        last FAILED_SONG_COOLDOWN_DAYS days.
     """
     try:
         with open(used_songs_log_path, 'r') as f:
@@ -223,13 +234,17 @@ def _load_active_exclusions(used_songs_log_path):
     except (FileNotFoundError, json.JSONDecodeError):
         return set(), set()
 
-    cutoff = datetime.now() - timedelta(days=DRIVE_ONLY_COOLDOWN_DAYS)
+    now = datetime.now()
 
     def _still_active(song):
         if song.get('youtube_id'):
             return True
+        cooldown_days = (
+            FAILED_SONG_COOLDOWN_DAYS if song.get('status') in ('failed', 'skipped')
+            else DRIVE_ONLY_COOLDOWN_DAYS
+        )
         try:
-            return datetime.fromisoformat(song['date_added']) >= cutoff
+            return datetime.fromisoformat(song['date_added']) >= now - timedelta(days=cooldown_days)
         except (KeyError, ValueError, TypeError):
             # Can't tell how old the entry is -- err on the side of not
             # re-picking it rather than risking a duplicate.
@@ -260,10 +275,11 @@ def get_viral_ytmusic_song(used_songs_log_path, only_find_english_songs=False):
 
     # --- Load used songs from log (YouTube-published songs are excluded
     # permanently; Drive-only songs are excluded for a cooldown period to
-    # give the manual Drive-to-YouTube publish step time to happen) ---
+    # give the manual Drive-to-YouTube publish step time to happen; failed/
+    # skipped candidates are excluded for a much shorter cooldown) ---
     used_spotify_ids, used_song_artist_pairs = _load_active_exclusions(used_songs_log_path)
     if used_spotify_ids or used_song_artist_pairs:
-        print(f"  Loaded {len(used_spotify_ids)} IDs and {len(used_song_artist_pairs)} name/artist pairs from the log (published, or within the {DRIVE_ONLY_COOLDOWN_DAYS}-day cooldown).")
+        print(f"  Loaded {len(used_spotify_ids)} IDs and {len(used_song_artist_pairs)} name/artist pairs from the log (published, within the {DRIVE_ONLY_COOLDOWN_DAYS}-day drive-only cooldown, or within the {FAILED_SONG_COOLDOWN_DAYS}-day failed/skipped cooldown).")
     else:
         print("  No active exclusions found in the log. Starting fresh.")
 
@@ -382,7 +398,7 @@ def get_viral_billboard_song(used_songs_log_path, only_find_english_songs=False)
     print("--- Finding a Trending Song from Billboard Hot 100 ---")
     used_spotify_ids, used_song_artist_pairs = _load_active_exclusions(used_songs_log_path)
     if used_spotify_ids or used_song_artist_pairs:
-        print(f"  Loaded {len(used_spotify_ids)} IDs and {len(used_song_artist_pairs)} name/artist pairs from the log (published, or within the {DRIVE_ONLY_COOLDOWN_DAYS}-day cooldown).")
+        print(f"  Loaded {len(used_spotify_ids)} IDs and {len(used_song_artist_pairs)} name/artist pairs from the log (published, within the {DRIVE_ONLY_COOLDOWN_DAYS}-day drive-only cooldown, or within the {FAILED_SONG_COOLDOWN_DAYS}-day failed/skipped cooldown).")
     else:
         print("  No active exclusions found in the log. Starting fresh.")
 
@@ -1048,6 +1064,11 @@ def log_used_song(song_info, youtube_video_id, used_songs_log_path):
 
     existing_entry = next((s for s in used_songs_data if spotify_id and s.get('spotify_id') == spotify_id), None)
     if existing_entry:
+        # A real upload always supersedes a prior failed/skipped record for
+        # the same song -- clear those stale fields so the log doesn't keep
+        # calling a now-successful upload "failed".
+        existing_entry.pop('status', None)
+        existing_entry.pop('reason', None)
         if youtube_video_id and not existing_entry.get('youtube_id'):
             existing_entry['youtube_id'] = youtube_video_id
             existing_entry['youtube_url'] = f"https://www.youtube.com/watch?v={youtube_video_id}"
@@ -1087,6 +1108,54 @@ def log_used_song(song_info, youtube_video_id, used_songs_log_path):
         json.dump(used_songs_data, f, indent=4)
         
     print(f"  Successfully added '{song_info.get('name', 'N/A')}' to the top of the log.")
+
+
+def log_failed_song(song_info, reason, used_songs_log_path):
+    """
+    Records a candidate that was picked but never made it to upload --
+    quality check failed, or audio/lyrics couldn't be found -- so it isn't
+    immediately re-picked (see FAILED_SONG_COOLDOWN_DAYS / _load_active_exclusions).
+    Mirrors log_used_song's update-in-place-and-move-to-top behavior, but
+    never touches an entry that already has a youtube_id or is otherwise a
+    real (non-failed) log entry -- those are left alone since a candidate
+    that already failed can't also be a live/pending upload.
+    """
+    try:
+        with open(used_songs_log_path, 'r') as f:
+            used_songs_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        used_songs_data = []
+
+    spotify_id = song_info.get('spotify_id')
+    existing_entry = next((s for s in used_songs_data if spotify_id and s.get('spotify_id') == spotify_id), None)
+
+    if existing_entry and not existing_entry.get('youtube_id'):
+        existing_entry['status'] = 'failed'
+        existing_entry['reason'] = reason
+        existing_entry['date_added'] = datetime.now().isoformat(timespec='seconds')
+        used_songs_data.remove(existing_entry)
+        used_songs_data.insert(0, existing_entry)
+    elif not existing_entry:
+        used_songs_data.insert(0, {
+            "song_name": song_info.get('name', 'N/A'),
+            "artist_name": song_info.get('artist', 'N/A'),
+            "is_explicit": song_info.get('is_explicit', False),
+            "date_added": datetime.now().isoformat(timespec='seconds'),
+            "youtube_id": None,
+            "youtube_url": None,
+            "spotify_id": spotify_id,
+            "spotify_url": f"https://open.spotify.com/track/{spotify_id}" if spotify_id else "N/A",
+            "status": "failed",
+            "reason": reason,
+        })
+    else:
+        # Already has a youtube_id -- a live/pending entry, not ours to touch.
+        return
+
+    with open(used_songs_log_path, 'w') as f:
+        json.dump(used_songs_data, f, indent=4)
+
+    print(f"  Logged '{song_info.get('name', 'N/A')}' as failed ({reason}) -- excluded for {FAILED_SONG_COOLDOWN_DAYS} day(s).")
 
 # --- MAIN WORKFLOW ---
 def main():

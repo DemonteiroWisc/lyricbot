@@ -615,6 +615,20 @@ def _resume_from_checkpoint(config, checkpoint):
     return True, f"{song_info['artist']} - {song_info['name']}"
 
 
+def _log_failed_song_safe(song_info, reason, config):
+    """
+    Wrapped like the log_used_song call above -- a bookkeeping I/O failure
+    here (disk full, or a race with youtube_backfill's concurrent write to
+    the same USED_SONGS_LOG) must not escape what's meant to be a soft
+    "skip this candidate, try another" path and abort the whole run.
+    """
+    try:
+        music_fetch.log_failed_song(song_info, reason, config['USED_SONGS_LOG'])
+    except Exception as e:
+        print(f"  [WARNING] Failed to log skipped/failed song: {e}")
+        logger.warning("log_failed_song failed for %s - %s: %s", song_info['artist'], song_info['name'], e)
+
+
 def run_workflow(config):
     """
     The main workflow, now driven by a configuration dictionary.
@@ -682,6 +696,8 @@ def run_workflow(config):
                 print(f"\n[VALIDATION FAILED] Could not fetch all required assets. Skipping song.")
                 logger.info("Skipped %s - %s: missing %s", song_info['artist'], song_info['name'],
                              "audio" if not audio_paths else "lyrics")
+                if config['USE_VIRAL_SONG_FINDER']:
+                    _log_failed_song_safe(song_info, "missing_audio" if not audio_paths else "missing_lyrics", config)
                 continue
             
             songs_to_process.append((song_info, lrc_paths, audio_paths))
@@ -723,7 +739,10 @@ def run_workflow(config):
                     best_overall_result = current_result
 
             if not best_overall_result:
-                print("\n[CRITICAL] Master bake-off failed to find any valid alignment. Skipping song."); continue
+                print("\n[CRITICAL] Master bake-off failed to find any valid alignment. Skipping song.")
+                if config['USE_VIRAL_SONG_FINDER']:
+                    _log_failed_song_safe(song_info, "no_valid_alignment", config)
+                continue
 
             fallback_percentage = best_overall_result['fallback_percentage']
             quality_check_passed = not (config['PROCESSING_MODE'] == 'SINGLE' and config['USE_VIRAL_SONG_FINDER'] and fallback_percentage > 40.0)
@@ -763,6 +782,7 @@ def run_workflow(config):
                 print(f"\n--- QUALITY CHECK FAILED (Fallback: {fallback_percentage:.2f}%) ---")
                 print("--- Finding a new song. ---")
                 logger.info("Quality check failed for %s - %s (fallback %.2f%%)", song_info['artist'], song_info['name'], fallback_percentage)
+                _log_failed_song_safe(song_info, "quality_check_failed", config)
                 video_generator.cleanup_bakeoff_assets(all_audio_paths=audio_paths, winning_audio_path=best_overall_result['original_audio_path'], asset_folder=config['ASSET_FOLDER'])
                 break
             

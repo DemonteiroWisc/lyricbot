@@ -160,7 +160,10 @@ def backfill_youtube_ids(config):
     except (FileNotFoundError, json.JSONDecodeError):
         return
 
-    drive_only = [s for s in log_data if not s.get('youtube_id') and s.get('spotify_id')]
+    drive_only = [
+        s for s in log_data
+        if not s.get('youtube_id') and s.get('spotify_id') and s.get('status') not in ('failed', 'skipped')
+    ]
 
     updated = 0
     for video in videos:
