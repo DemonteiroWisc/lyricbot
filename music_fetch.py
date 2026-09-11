@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import requests
@@ -20,6 +21,11 @@ import glob
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Shared with pipeline_logging.setup_logging(), which owns the handler/file;
+# grabbing it by name here (rather than importing lyricbot_core) avoids a
+# circular import while still landing these messages in the same run log.
+logger = logging.getLogger("lyricbot")
 
 # --- CONFIGURATION ---
 GENERATE_NEW_BACKGROUND = True
@@ -93,6 +99,24 @@ def is_likely_english(sp, spotify_track_object):
         print(f"    -> Language Check Warning: Could not verify artist genres: {e}")
         # Failsafe: If the API call fails for any reason, assume it's okay to proceed
         return True
+
+def _safe_spotify_search(sp, query, market="US"):
+    """
+    Wraps the single-track sp.search() lookup used by the viral-song finders.
+    Spotify occasionally serves a short burst of 429/5xx errors that exhausts
+    spotipy's built-in retry budget (spotipy.Spotify.max_retries -- only 3
+    retries with a 0.3s backoff factor, so ~2s total before it gives up and
+    raises). Without this, that raises all the way out of the search loop
+    and crashes the whole run instead of just failing this one candidate.
+    Returns None on failure so the caller can treat it like any other
+    "not found" candidate and move on to the next one.
+    """
+    try:
+        return sp.search(q=query, type='track', limit=1, market=market)
+    except Exception as e:
+        print(f"    -> Spotify error, skipping this candidate: {e}")
+        return None
+
 
 def is_valid_lrc(lrc_text):
     if not lrc_text: return False
@@ -185,7 +209,7 @@ def clean_youtube_title(title):
     Cleans a YouTube video title to make it a better search query for Spotify.
     """
     if not title: return ""
-    title = title.replace('“', '').replace('”', '')
+    title = title.replace('“', '').replace('”', '').replace('"', '')
     title = re.sub(r'[\(\[].*?[\)\]]', '', title)
     title = title.split('|')[0]
     keywords = ['official music video', 'official video', 'lyric video', 'lyrics', 'audio', 'official']
@@ -315,7 +339,11 @@ def get_viral_ytmusic_song(used_songs_log_path, only_find_english_songs=False):
 
     # --- Step 2: Iteratively pick, check, and return the first valid song ---
     auth_manager = SpotifyClientCredentials(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
-    sp = spotipy.Spotify(auth_manager=auth_manager)
+    # A larger retry budget and backoff than spotipy's default (3 retries,
+    # 0.3s backoff factor -- ~2s total) so a short burst of Spotify-side
+    # 429/5xx errors gets ridden out instead of exhausting the retry budget
+    # in ~2 seconds.
+    sp = spotipy.Spotify(auth_manager=auth_manager, retries=5, status_retries=5, backoff_factor=1.0)
     
     attempts = 0
     while attempts < MAX_SEARCH_ATTEMPTS and all_tracks:
@@ -342,7 +370,20 @@ def get_viral_ytmusic_song(used_songs_log_path, only_find_english_songs=False):
 
         # Now perform the single, targeted Spotify search
         query = f"track:{cleaned_title} artist:{yt_artist}"
-        results = sp.search(q=query, type='track', limit=1, market="US")
+        results = _safe_spotify_search(sp, query)
+
+        if not results or not results['tracks']['items']:
+            # The field-filtered query above requires cleaned_title to be
+            # close to the literal track name. YouTube titles often bury the
+            # artist, a "feat." credit, or other cruft inside the title
+            # itself (e.g. "Zerb, Khalid - Faded Eyes"), which the track:
+            # filter treats as part of the title and fails to match even
+            # though the song is really on Spotify. A plain, unfiltered
+            # search is far more tolerant of that extra text, so fall back
+            # to it before giving up on this candidate.
+            print("    -> Not found with exact match. Trying a broader search...")
+            fallback_query = f"{cleaned_title} {yt_artist}"
+            results = _safe_spotify_search(sp, fallback_query)
 
         if not results or not results['tracks']['items']:
             print("    -> Not found on Spotify. Trying next song.")
@@ -963,77 +1004,96 @@ def prepare_media_assets(song_info, asset_folder):
     # Return True only if both were successful
     return all([audio_success, background_success])
 
-def generate_background_image(output_path):
-    MAX_ATTEMPTS = 2
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        print(f"\nGenerating AI background with Leonardo.AI... (Attempt {attempt}/{MAX_ATTEMPTS})")
-        
-        FLUX_DEV_MODEL_ID = "b2614463-296c-462a-9586-aafdb8f00e36"
-        base_prompts = [
-            "A vast, minimalist sky with a smooth, deeply saturated evening gradient. A simple, sharp mountain range silhouette rests directly on the bottom edge of the frame, highly detailed.",
-            "A minimalist, sharp-focus sky with a vibrant and warm evening gradient. A dark, crisp mountain silhouette is flush with the absolute bottom of the image, clear and detailed.",
-            "Cinematic wide shot of a minimalist abstract gradient with rich and intensely vibrant warm colors. A sharp, minimalist mountain silhouette sits firmly at the very bottom border of the image.",
-        ]
-        prompt = random.choice(base_prompts)
-        negative_prompt = "watermark, text, blurry, soft, out of focus, hazy, grainy, noisy, misty, foggy, dull"
-        print(f"  -> Using prompt: \"{prompt[:80]}...\"")
-        headers = {"accept": "application/json", "content-type": "application/json", "authorization": f"Bearer {LEONARDO_API_KEY}"}
-        payload = {"prompt": prompt, "negative_prompt": negative_prompt, "modelId": FLUX_DEV_MODEL_ID, "width": 1536, "height": 864, "num_images": 1, "presetStyle": "NONE", "guidance_scale": 7}
-        start_job_url = "https://cloud.leonardo.ai/api/rest/v1/generations"
+# (model_name, model_id) pairs to try in order. Lucid Origin is Leonardo's own
+# flagship model -- confirmed to cost the same per image as Flux Dev at these
+# settings ($0.0164) and to produce very similar minimalist-gradient output,
+# so it's a safe backup for when Flux Dev's pipeline is degraded (as observed
+# 2026-09-10: every Flux Dev job failed/hung while Lucid Origin completed
+# normally on the same account).
+BACKGROUND_MODELS = [
+    ("Flux Dev", "b2614463-296c-462a-9586-aafdb8f00e36"),
+    ("Lucid Origin", "7b592283-e8a7-4c5a-9ba6-d18c31f258b9"),
+]
 
-        try:
-            response = requests.post(start_job_url, json=payload, headers=headers, timeout=30)
-            response.raise_for_status()
-            generation_id = response.json()['sdGenerationJob']['generationId']
-            print(f"  -> Job started successfully. Generation ID: {generation_id}")
 
-            get_job_url = f"https://cloud.leonardo.ai/api/rest/v1/generations/{generation_id}"
-            max_wait_time = 180; poll_interval = 10; start_time = time.time(); image_generated = False
-            while time.time() - start_time < max_wait_time:
-                print("  -> Checking job status...")
-                response = requests.get(get_job_url, headers=headers, timeout=30); response.raise_for_status()
-                job_data = response.json().get('generations_by_pk', {}); job_status = job_data.get('status')
-                if job_status == 'COMPLETE':
-                    print("  -> Generation COMPLETE.")
-                    images = job_data.get('generated_images', [])
-                    if images:
-                        image_url = images[0]['url']; print("  -> Downloading final image...")
-                        image_response = requests.get(image_url, timeout=30)
-                        if image_response.status_code == 200:
-                            with open(output_path, "wb") as f: f.write(image_response.content)
-                            print(f"  -> Successfully saved base image to '{output_path}'")
-                            image_generated = True
-                    break
-                elif job_status == 'FAILED':
-                    raise Exception("Leonardo generation job failed.")
-                else:
-                    time.sleep(poll_interval)
-            
-            if not image_generated:
-                raise Exception("Job timed out or failed to generate image URL.")
+def _generate_background_image_with_model(output_path, model_name, model_id):
+    """Runs one Leonardo generation + upscale attempt with the given model. Returns True on success."""
+    base_prompts = [
+        "A vast, minimalist sky with a smooth, deeply saturated evening gradient. A simple, sharp mountain range silhouette rests directly on the bottom edge of the frame, highly detailed.",
+        "A minimalist, sharp-focus sky with a vibrant and warm evening gradient. A dark, crisp mountain silhouette is flush with the absolute bottom of the image, clear and detailed.",
+        "Cinematic wide shot of a minimalist abstract gradient with rich and intensely vibrant warm colors. A sharp, minimalist mountain silhouette sits firmly at the very bottom border of the image.",
+    ]
+    prompt = random.choice(base_prompts)
+    negative_prompt = "watermark, text, blurry, soft, out of focus, hazy, grainy, noisy, misty, foggy, dull"
+    print(f"  -> Using prompt: \"{prompt[:80]}...\"")
+    headers = {"accept": "application/json", "content-type": "application/json", "authorization": f"Bearer {LEONARDO_API_KEY}"}
+    payload = {"prompt": prompt, "negative_prompt": negative_prompt, "modelId": model_id, "width": 1536, "height": 864, "num_images": 1, "presetStyle": "NONE", "guidance_scale": 7}
+    start_job_url = "https://cloud.leonardo.ai/api/rest/v1/generations"
 
-            print("\n--- Upscaling Background Image for Maximum Quality ---")
-            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-            upsampler = RealESRGANer(scale=4, model_path='https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth', model=model, tile=0, half=False)
-            img = cv2.imread(output_path, cv2.IMREAD_UNCHANGED)
-            original_height, original_width = img.shape[:2]
-            print("  Enhancing image...")
-            output, _ = upsampler.enhance(img, outscale=4)
-            target_width = original_width * 2; target_height = original_height * 2
-            final_image = cv2.resize(output, (target_width, target_height), interpolation=cv2.INTER_AREA)
-            cv2.imwrite(output_path, final_image)
-            print(f"  -> SUCCESS: Final high-resolution image saved. New resolution: {final_image.shape[1]}x{final_image.shape[0]}")
-            return True # Success, exit function
+    response = requests.post(start_job_url, json=payload, headers=headers, timeout=30)
+    response.raise_for_status()
+    generation_id = response.json()['sdGenerationJob']['generationId']
+    print(f"  -> Job started successfully. Generation ID: {generation_id}")
 
-        except Exception as e:
-            print(f"  -> [ERROR] An error occurred during background generation: {e}")
-
-        if attempt < MAX_ATTEMPTS:
-            print("  -> Background generation failed. Waiting for 5 minutes before retrying...")
-            time.sleep(300)
+    get_job_url = f"https://cloud.leonardo.ai/api/rest/v1/generations/{generation_id}"
+    max_wait_time = 180; poll_interval = 10; start_time = time.time(); image_generated = False
+    while time.time() - start_time < max_wait_time:
+        print("  -> Checking job status...")
+        response = requests.get(get_job_url, headers=headers, timeout=30); response.raise_for_status()
+        job_data = response.json().get('generations_by_pk', {}); job_status = job_data.get('status')
+        if job_status == 'COMPLETE':
+            print("  -> Generation COMPLETE.")
+            images = job_data.get('generated_images', [])
+            if images:
+                image_url = images[0]['url']; print("  -> Downloading final image...")
+                image_response = requests.get(image_url, timeout=30)
+                if image_response.status_code == 200:
+                    with open(output_path, "wb") as f: f.write(image_response.content)
+                    print(f"  -> Successfully saved base image to '{output_path}'")
+                    image_generated = True
+            break
+        elif job_status == 'FAILED':
+            raise Exception(f"Leonardo generation job failed ({model_name}).")
         else:
-            print("  -> Final background generation attempt failed.")
-            
+            time.sleep(poll_interval)
+
+    if not image_generated:
+        raise Exception(f"Job timed out or failed to generate image URL ({model_name}).")
+
+    print("\n--- Upscaling Background Image for Maximum Quality ---")
+    model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+    upsampler = RealESRGANer(scale=4, model_path='https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth', model=model, tile=0, half=False)
+    img = cv2.imread(output_path, cv2.IMREAD_UNCHANGED)
+    original_height, original_width = img.shape[:2]
+    print("  Enhancing image...")
+    output, _ = upsampler.enhance(img, outscale=4)
+    target_width = original_width * 2; target_height = original_height * 2
+    final_image = cv2.resize(output, (target_width, target_height), interpolation=cv2.INTER_AREA)
+    cv2.imwrite(output_path, final_image)
+    print(f"  -> SUCCESS: Final high-resolution image saved. New resolution: {final_image.shape[1]}x{final_image.shape[0]}")
+    return True
+
+
+def generate_background_image(output_path):
+    MAX_ATTEMPTS_PER_MODEL = 2
+    for model_index, (model_name, model_id) in enumerate(BACKGROUND_MODELS):
+        is_last_model = model_index == len(BACKGROUND_MODELS) - 1
+        for attempt in range(1, MAX_ATTEMPTS_PER_MODEL + 1):
+            print(f"\nGenerating AI background with Leonardo.AI ({model_name})... (Attempt {attempt}/{MAX_ATTEMPTS_PER_MODEL})")
+            try:
+                return _generate_background_image_with_model(output_path, model_name, model_id)
+            except Exception as e:
+                print(f"  -> [ERROR] An error occurred during background generation: {e}")
+                logger.warning("Background generation attempt %d/%d with %s raised: %s", attempt, MAX_ATTEMPTS_PER_MODEL, model_name, e)
+
+            if attempt < MAX_ATTEMPTS_PER_MODEL:
+                print("  -> Background generation failed. Waiting for 5 minutes before retrying...")
+                time.sleep(300)
+            elif not is_last_model:
+                print(f"  -> {model_name} exhausted its attempts. Falling back to the next model...")
+            else:
+                print("  -> Final background generation attempt failed (all models exhausted).")
+
     return False
 
 def log_used_song(song_info, youtube_video_id, used_songs_log_path):

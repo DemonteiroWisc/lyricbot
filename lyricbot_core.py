@@ -309,7 +309,8 @@ def _checkpoint_file(config):
     return os.path.join(config['ASSET_FOLDER'], name)
 
 
-def _save_checkpoint(config, song_info, best_overall_result, background_image_path, audio_paths):
+def _save_checkpoint(config, song_info, best_overall_result, background_image_path, audio_paths,
+                      background_generated=True):
     try:
         data = {
             'saved_at': datetime.now().isoformat(),
@@ -317,6 +318,7 @@ def _save_checkpoint(config, song_info, best_overall_result, background_image_pa
             'best_overall_result': best_overall_result,
             'background_image_path': background_image_path,
             'audio_paths': audio_paths,
+            'background_generated': background_generated,
         }
         with open(_checkpoint_file(config), 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False)
@@ -340,12 +342,16 @@ def _load_checkpoint(config):
             return None
         result = data['best_overall_result']
         referenced_paths = [
-            data['background_image_path'],
             result['lrc_path'],
             result['original_audio_path'],
             result['winning_audio_path'],
             result['winning_vocal_path'],
         ] + data['audio_paths']
+        # The background image may not exist yet -- a checkpoint saved right
+        # before the Leonardo call (so a failure there doesn't lose the
+        # discovery/download/bake-off work) has nothing to check here.
+        if data.get('background_generated', True):
+            referenced_paths.append(data['background_image_path'])
         if not all(os.path.exists(p) for p in referenced_paths):
             print("  [INFO] Ignoring resume checkpoint: referenced files no longer exist.")
             _clear_checkpoint(config)
@@ -585,13 +591,33 @@ def _verify_drive_access(config):
 def _resume_from_checkpoint(config, checkpoint):
     """
     Resumes an interrupted run: skips song discovery, audio download, and the
-    Whisper bake-off, and jumps straight to rendering + uploading using the
-    song/background/audio captured in the checkpoint. One-shot: the
-    checkpoint is cleared once this attempt finishes, win or lose.
+    Whisper bake-off, and jumps straight to using the song/background/audio
+    captured in the checkpoint. One-shot: the checkpoint is cleared once this
+    attempt finishes, win or lose -- except when the checkpoint was saved
+    before background generation completed. In that case we retry just that
+    step here; if it fails again we log the song as failed (so it isn't
+    picked up again for a while), clear the checkpoint, and return None so
+    the caller falls through to a fresh discovery attempt instead of
+    aborting the whole run.
     """
     song_info = checkpoint['song_info']
     print(f"\n--- RESUMING interrupted run for: {song_info['artist']} - {song_info['name']} ---")
     logger.info("Resuming checkpoint for %s - %s", song_info['artist'], song_info['name'])
+
+    background_image_path = checkpoint['background_image_path']
+    if not checkpoint.get('background_generated', True):
+        print("\n--- Retrying background generation for the resumed song... ---")
+        if not music_fetch.generate_background_image(background_image_path):
+            print("\n[CRITICAL] Background generation failed again. Abandoning this candidate.")
+            logger.error("Background generation failed again on resume for %s - %s", song_info['artist'], song_info['name'])
+            _log_failed_song_safe(song_info, "background_generation_failed", config)
+            video_generator.cleanup_bakeoff_assets(
+                all_audio_paths=checkpoint['audio_paths'],
+                winning_audio_path=checkpoint['best_overall_result']['original_audio_path'],
+                asset_folder=config['ASSET_FOLDER'],
+            )
+            _clear_checkpoint(config)
+            return None
 
     drive_service, drive_parent_folder_name = _verify_drive_access(config)
 
@@ -603,7 +629,7 @@ def _resume_from_checkpoint(config, checkpoint):
     try:
         _finish_and_upload_song(
             config, song_info, checkpoint['best_overall_result'],
-            checkpoint['background_image_path'], checkpoint['audio_paths'],
+            background_image_path, checkpoint['audio_paths'],
             drive_service, drive_parent_folder_name,
             schedule_start_time=None, song_index=0, whisper_model=whisper_model
         )
@@ -639,7 +665,11 @@ def run_workflow(config):
 
     checkpoint = _load_checkpoint(config)
     if checkpoint:
-        return _resume_from_checkpoint(config, checkpoint)
+        result = _resume_from_checkpoint(config, checkpoint)
+        if result is not None:
+            return result
+        # Background retry failed and the checkpoint's been cleared already
+        # -- fall through to a normal discovery run instead of aborting.
 
     cleanup_temp_files(config)
 
@@ -793,12 +823,20 @@ def run_workflow(config):
             # --- FIX: Generate the background image HERE, only after a song is confirmed. ---
             background_image_path = os.path.join(config['ASSET_FOLDER'], "test_background.jpg")
             if config['GENERATE_NEW_BACKGROUND']:
+                # Checkpoint now, before the paid Leonardo call: song
+                # discovery, audio download, and the Whisper bake-off are
+                # already done, so if generation fails or crashes, the next
+                # run resumes here and just retries this step instead of
+                # throwing that work away and picking a new song from
+                # scratch. background_generated=False until it succeeds.
+                _save_checkpoint(config, song_info, best_overall_result, background_image_path, audio_paths,
+                                  background_generated=False)
                 print("\n--- Generating background image for confirmed song... ---")
                 if not music_fetch.generate_background_image(background_image_path):
                     print("\n[CRITICAL] Background generation failed. Cannot proceed with video creation.")
                     logger.error("Background generation failed for %s - %s", song_info['artist'], song_info['name'])
                     successful_song_found = False
-                    break # Exit the song processing loop
+                    break # Exit the song processing loop -- checkpoint stays for the next run to resume
             # --- END OF FIX ---
 
             # Everything expensive up to here (song discovery, audio download,
