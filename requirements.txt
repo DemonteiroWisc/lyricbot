@@ -18,6 +18,7 @@ yt-dlp==2026.7.4
 
 # Transcription
 stable-ts==2.19.1
+langdetect==1.0.9
 
 # Background upscaling
 # torch is CUDA-build specific (this project was tested with 2.8.0+cu129);

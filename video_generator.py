@@ -4,6 +4,9 @@ import sys
 import subprocess
 import math
 import stable_whisper as whisper
+from whisper.tokenizer import LANGUAGES as WHISPER_SUPPORTED_LANGUAGES
+import langdetect
+from langdetect import DetectorFactory
 import torch
 import shutil
 import time
@@ -18,6 +21,11 @@ from pydub.silence import detect_silence
 import json
 from PIL import Image, ImageDraw, ImageFont, ImageFilter # <-- ADDED IMPORTS
 import unicodedata
+
+# langdetect's detector is otherwise randomized per-run and can flip its
+# answer between identical calls on short/ambiguous text; seeding it makes
+# language detection (and therefore alignment results) reproducible.
+DetectorFactory.seed = 0
 
 # --- CONFIGURATION: STYLE AND TIMING ---
 FONT_FILE = 'assets/BebasNeue-Regular.ttf'
@@ -230,17 +238,45 @@ def separate_vocals(audio_path, variant_name, asset_folder):
         print(f"  [CRITICAL ERROR] An unexpected error occurred during Demucs processing: {e}")
         return None, None
 
+# langdetect mostly reports plain ISO 639-1 codes matching Whisper's tokenizer,
+# but reports Chinese as region-qualified variants Whisper doesn't recognize.
+_LANGDETECT_TO_WHISPER_LANG = {
+    'zh-cn': 'zh', 'zh-tw': 'zh',
+}
+
+
+def _detect_lyrics_language(lyrics_text):
+    """
+    Detects the dominant language of a lyrics text so forced alignment can
+    use the matching tokenizer instead of always assuming English. Aligning
+    non-English lyrics (e.g. Spanish, Korean) as English produces near-
+    garbage word timings, which was showing up as 85%+ fallback rates (and
+    failed quality checks) on non-English candidates.
+    Falls back to 'en' if detection fails or returns a language Whisper's
+    tokenizer doesn't support.
+    """
+    try:
+        detected = langdetect.detect(lyrics_text)
+    except Exception:
+        return 'en'
+    detected = _LANGDETECT_TO_WHISPER_LANG.get(detected, detected)
+    return detected if detected in WHISPER_SUPPORTED_LANGUAGES else 'en'
+
+
 def align_lyrics_to_vocals(vocal_track_path, lrc_path, whisper_model):
     print(f"--- 2. Performing Forced Alignment for '{os.path.basename(lrc_path)}' ---")
     try:
         with open(lrc_path, 'r', encoding='utf-8-sig') as f:
             full_lyrics_text = "\n".join([re.sub(r'\[.*?\]', '', line).strip() for line in f])
-        
+
+        language = _detect_lyrics_language(full_lyrics_text)
+        print(f"  Detected lyrics language: '{language}'")
+
         # --- THE FIX: ADDED max_expand_ms PARAMETER ---
         result = whisper_model.align(
-            vocal_track_path, 
-            full_lyrics_text, 
-            language='en',
+            vocal_track_path,
+            full_lyrics_text,
+            language=language,
             regroup=False,
             max_word_dur=3.0  # Allow timestamps to stretch by up to 1 second
         )
