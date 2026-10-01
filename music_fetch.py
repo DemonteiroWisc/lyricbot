@@ -639,38 +639,52 @@ def fetch_all_assets(song_info, num_audio_to_download=2, asset_folder="test_asse
         else:
             print("  -> Simplified name is the same as the original, skipping broader search.")
 
-    # --- Tier 3: Musixmatch Multi-Strategy Search ---
+    # --- Tier 3: Multi-provider, multi-strategy search ---
     # MODIFICATION: This tier now runs regardless of previous success.
-    print("\n--- Tier 3: Searching Musixmatch with multiple strategies ---")
-    musixmatch_found = False
+    # Musixmatch has the deepest catalog and is the only one of these that
+    # supports word-by-word ("enhanced") sync, so it's tried first with that
+    # extra fidelity. Megalobiz is a broader fallback database that often
+    # covers songs Musixmatch misses (niche/indie releases) -- added after
+    # repeated "no lyrics found" failures on otherwise-fine songs were
+    # traced to Musixmatch simply not having them. (Genius is deliberately
+    # NOT included here: syncedlyrics's Genius provider only ever returns
+    # plain, non-timestamped lyrics, which clean_lrc_text() always discards
+    # since it requires [MM:SS.xx] timestamps -- it would just be a wasted
+    # request every time.)
+    print("\n--- Tier 3: Searching Musixmatch/Megalobiz with multiple strategies ---")
+    tier3_found = False
     search_terms_to_try = []
     simplified_name = re.sub(r'\s*\([^)]*\)', '', song_name).strip()
     featured_artist = ""
     match = re.search(r'(?:feat|ft|featuring)\.?\s(.*?)\)', song_name, re.IGNORECASE)
     if match: featured_artist = match.group(1).strip()
-    
+
     search_terms_to_try.append(f"{song_name} {artist_name}")
     search_terms_to_try.append(f"{simplified_name} {artist_name} {featured_artist}".strip())
     search_terms_to_try.append(f"{simplified_name} {artist_name}")
     unique_search_terms = list(dict.fromkeys(search_terms_to_try))
 
-    for term in unique_search_terms:
-        if musixmatch_found: break
-        print(f"  > Checking Musixmatch with term: '{term}'...")
-        try:
-            lrc_data = syncedlyrics.search(term, save_path=None, enhanced=True, providers=['Musixmatch'])
-            final_lrc_content = clean_lrc_text(lrc_data)
-            if final_lrc_content and final_lrc_content not in unique_lrcs:
-                unique_lrcs.add(final_lrc_content)
-                output_path = os.path.join(asset_folder, f"lyrics_candidate_{len(candidate_paths)}.lrc")
-                with open(output_path, 'w', encoding='utf-8') as f: f.write(final_lrc_content)
-                candidate_paths.append(output_path)
-                print(f"    -> SUCCESS: Saved unique Musixmatch candidate.")
-                musixmatch_found = True
-        except Exception:
-            print(f"    -> Failed.")
-    if not musixmatch_found:
-        print("    -> No valid LRC found from any Musixmatch strategy.")
+    TIER3_PROVIDERS = [("Musixmatch", True), ("Megalobiz", False)]
+    for provider_name, enhanced in TIER3_PROVIDERS:
+        if tier3_found: break
+        for term in unique_search_terms:
+            if tier3_found: break
+            print(f"  > Checking {provider_name} with term: '{term}'...")
+            try:
+                lrc_data = syncedlyrics.search(term, save_path=None, enhanced=enhanced, providers=[provider_name])
+                final_lrc_content = clean_lrc_text(lrc_data)
+                if final_lrc_content and final_lrc_content not in unique_lrcs:
+                    unique_lrcs.add(final_lrc_content)
+                    output_path = os.path.join(asset_folder, f"lyrics_candidate_{len(candidate_paths)}.lrc")
+                    with open(output_path, 'w', encoding='utf-8') as f: f.write(final_lrc_content)
+                    candidate_paths.append(output_path)
+                    print(f"    -> SUCCESS: Saved unique {provider_name} candidate.")
+                    tier3_found = True
+            except Exception as e:
+                print(f"    -> Failed.")
+                logger.warning("%s lyrics search failed for '%s': %s", provider_name, term, e)
+    if not tier3_found:
+        print("    -> No valid LRC found from Musixmatch or Megalobiz.")
 
     # --- Tier 4: Lrclib GET (duration-matched, higher priority) ---
     # MODIFICATION: This tier now runs regardless of previous success.
@@ -729,10 +743,17 @@ def fetch_all_assets(song_info, num_audio_to_download=2, asset_folder="test_asse
     print(f"Lyrics: {'SUCCESS' if lyrics_success else 'FAILED'} ({len(candidate_paths)} candidates found)")
     print(f"Background: {'SUCCESS' if background_success else 'FAILED'}")
 
-    if all([audio_success, lyrics_success, background_success]):
-        return candidate_paths, downloaded_audio_paths
-    else:
-        return [], []
+    if not lyrics_success:
+        logger.info("No lyrics found for '%s' by '%s' after Lrclib/Musixmatch/Netease.", song_name, artist_name)
+    if not audio_success:
+        logger.info("No audio downloaded for '%s' by '%s'.", song_name, artist_name)
+
+    # NOTE: each half is reported independently of the others (rather than
+    # collapsing both to [] whenever ANY of audio/lyrics/background fails).
+    # Previously this always returned ([], []) on any single failure, which
+    # discarded a real successful audio download and made the caller
+    # (lyricbot_core.py) misreport a lyrics-only failure as "missing_audio".
+    return (candidate_paths if lyrics_success else []), (downloaded_audio_paths if audio_success else [])
 
 # --- OTHER FUNCTIONS ---
 def get_song_details_from_spotify(url, client_id, client_secret):
@@ -941,6 +962,8 @@ def download_song_audio(search_term, asset_folder, output_base_name="test_song",
                         # this same loop -- keep going and let the
                         # downloaded_paths check below decide success.
                         print(f"  -> [WARNING] Failed to download explicit-biased candidate #{index}: {inner_e}")
+                        logger.warning("yt-dlp failed on explicit-biased candidate #%d for '%s' (attempt %d/%d): %s",
+                                        index, search_term, attempt, MAX_ATTEMPTS, inner_e)
             else:
                 search_query = f'ytsearch{start_index}' if start_index > 1 else f'ytsearch{num_to_download}' # Search for the top N to get the Nth item
                 # This tells yt-dlp which items from the search results to download (e.g., 1-2, or just 3)
@@ -963,9 +986,13 @@ def download_song_audio(search_term, asset_folder, output_base_name="test_song",
                 return downloaded_paths
             else:
                 print("  -> [ERROR] yt-dlp ran but no output files were found.")
+                logger.warning("yt-dlp produced no output files for '%s' (attempt %d/%d)",
+                                search_term, attempt, MAX_ATTEMPTS)
 
         except Exception as e:
             print(f"  -> [ERROR] An exception occurred during audio download: {e}")
+            logger.warning("yt-dlp download failed for '%s' (attempt %d/%d): %s",
+                            search_term, attempt, MAX_ATTEMPTS, e)
 
         if attempt < MAX_ATTEMPTS:
             print("  -> Download failed. Waiting for 5 minutes before retrying...")
@@ -973,6 +1000,7 @@ def download_song_audio(search_term, asset_folder, output_base_name="test_song",
         else:
             print("  -> Final download attempt failed.")
 
+    logger.warning("Giving up on audio download for '%s' after %d attempts.", search_term, MAX_ATTEMPTS)
     return []
 
 def prepare_media_assets(song_info, asset_folder):

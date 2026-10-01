@@ -794,8 +794,13 @@ def run_workflow(config):
                     is_explicit=song_info.get('is_explicit', False)
                 )
 
-                if fallback_audio_paths:
-                    new_audio_path = fallback_audio_paths[0]
+                # download_song_audio returns every "*_v*.*" file currently on
+                # disk (via glob), not just the one it just fetched -- so we
+                # can't assume index 0 is the new file. Take whichever
+                # returned path(s) aren't already in our known audio_paths.
+                newly_downloaded = [p for p in fallback_audio_paths if p not in audio_paths]
+                if newly_downloaded:
+                    new_audio_path = newly_downloaded[0]
                     print(f"\n--- Running bake-off on new audio candidate: {os.path.basename(new_audio_path)} ---")
                     fallback_result = video_generator.find_best_alignment(song_info, lrc_paths, new_audio_path, asset_folder=config['ASSET_FOLDER'], model=whisper_model)
                     
