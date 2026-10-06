@@ -675,7 +675,7 @@ def run_workflow(config):
 
     drive_service, drive_parent_folder_name = _verify_drive_access(config)
 
-    MAX_QUALITY_CHECK_ATTEMPTS = 5
+    MAX_QUALITY_CHECK_ATTEMPTS = 7
     successful_song_found = False
     
     for attempt in range(1, MAX_QUALITY_CHECK_ATTEMPTS + 1):
@@ -725,9 +725,9 @@ def run_workflow(config):
             if not lrc_paths or not audio_paths:
                 print(f"\n[VALIDATION FAILED] Could not fetch all required assets. Skipping song.")
                 logger.info("Skipped %s - %s: missing %s", song_info['artist'], song_info['name'],
-                             "audio" if not audio_paths else "lyrics")
+                             "lyrics" if not lrc_paths else "audio")
                 if config['USE_VIRAL_SONG_FINDER']:
-                    _log_failed_song_safe(song_info, "missing_audio" if not audio_paths else "missing_lyrics", config)
+                    _log_failed_song_safe(song_info, "missing_lyrics" if not lrc_paths else "missing_audio", config)
                 continue
             
             songs_to_process.append((song_info, lrc_paths, audio_paths))

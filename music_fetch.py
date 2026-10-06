@@ -584,10 +584,8 @@ def fetch_all_assets(song_info, num_audio_to_download=2, asset_folder="test_asse
     audio_search_term = f"{song_name} {artist_name}"
     background_output_path = os.path.join(asset_folder, "test_background.jpg")
 
-    # Download audio first
-    downloaded_audio_paths = download_song_audio(audio_search_term, asset_folder, num_to_download=num_audio_to_download, is_explicit=is_explicit)
-    audio_success = len(downloaded_audio_paths) > 0
-
+    # Lyrics are searched first: they're cheap, and if none exist we skip the
+    # (much heavier, rate-limit-prone) YouTube audio download entirely.
     print(f"\nSearching for lyrics for '{song_name}'...")
     if is_explicit:
         print("  -> Song is explicit. Prioritizing search for explicit versions.")
@@ -731,6 +729,13 @@ def fetch_all_assets(song_info, num_audio_to_download=2, asset_folder="test_asse
     # --- Final Summary ---
     lyrics_success = len(candidate_paths) > 0
 
+    downloaded_audio_paths = []
+    if lyrics_success:
+        downloaded_audio_paths = download_song_audio(audio_search_term, asset_folder, num_to_download=num_audio_to_download, is_explicit=is_explicit)
+    else:
+        print("\nNo lyrics found -- skipping audio download.")
+    audio_success = len(downloaded_audio_paths) > 0
+
     background_success = False
     if GENERATE_NEW_BACKGROUND:
         background_success = generate_background_image(background_output_path)
@@ -739,13 +744,13 @@ def fetch_all_assets(song_info, num_audio_to_download=2, asset_folder="test_asse
         background_success = True
 
     print("\n--- Download Summary ---")
-    print(f"Audio: {'SUCCESS' if audio_success else 'FAILED'}")
+    print(f"Audio: {'SUCCESS' if audio_success else ('FAILED' if lyrics_success else 'SKIPPED (no lyrics)')}")
     print(f"Lyrics: {'SUCCESS' if lyrics_success else 'FAILED'} ({len(candidate_paths)} candidates found)")
     print(f"Background: {'SUCCESS' if background_success else 'FAILED'}")
 
     if not lyrics_success:
         logger.info("No lyrics found for '%s' by '%s' after Lrclib/Musixmatch/Netease.", song_name, artist_name)
-    if not audio_success:
+    if lyrics_success and not audio_success:
         logger.info("No audio downloaded for '%s' by '%s'.", song_name, artist_name)
 
     # NOTE: each half is reported independently of the others (rather than
@@ -912,6 +917,10 @@ def _select_explicit_biased_urls(search_term, num_to_download, start_index):
         return []
 
 
+def _is_youtube_bot_check(error):
+    msg = str(error).lower()
+    return "confirm you" in msg and "not a bot" in msg
+
 def download_song_audio(search_term, asset_folder, output_base_name="test_song", num_to_download=2, start_index=1, is_explicit=False):
     """
     Downloads the top N YouTube search results for a song as MP3 files.
@@ -925,6 +934,7 @@ def download_song_audio(search_term, asset_folder, output_base_name="test_song",
     """
     MAX_ATTEMPTS = 3
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        bot_blocked = False
         # Adjust log message based on whether we're downloading a range or a single item
         if start_index > 1:
             print(f"\nDownloading audio candidate #{start_index} for '{search_term}' from YouTube... (Attempt {attempt}/{MAX_ATTEMPTS})")
@@ -964,6 +974,9 @@ def download_song_audio(search_term, asset_folder, output_base_name="test_song",
                         print(f"  -> [WARNING] Failed to download explicit-biased candidate #{index}: {inner_e}")
                         logger.warning("yt-dlp failed on explicit-biased candidate #%d for '%s' (attempt %d/%d): %s",
                                         index, search_term, attempt, MAX_ATTEMPTS, inner_e)
+                        if _is_youtube_bot_check(inner_e):
+                            bot_blocked = True
+                            break
             else:
                 search_query = f'ytsearch{start_index}' if start_index > 1 else f'ytsearch{num_to_download}' # Search for the top N to get the Nth item
                 # This tells yt-dlp which items from the search results to download (e.g., 1-2, or just 3)
@@ -993,6 +1006,14 @@ def download_song_audio(search_term, asset_folder, output_base_name="test_song",
             print(f"  -> [ERROR] An exception occurred during audio download: {e}")
             logger.warning("yt-dlp download failed for '%s' (attempt %d/%d): %s",
                             search_term, attempt, MAX_ATTEMPTS, e)
+            bot_blocked = _is_youtube_bot_check(e)
+
+        if bot_blocked:
+            # Retrying from the same IP/session just repeats the block (and
+            # adds more requests), so give up on this song immediately.
+            print("  -> YouTube bot check hit. Not retrying.")
+            logger.warning("YouTube bot check hit for '%s'; skipping retries.", search_term)
+            return []
 
         if attempt < MAX_ATTEMPTS:
             print("  -> Download failed. Waiting for 5 minutes before retrying...")
