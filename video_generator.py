@@ -181,6 +181,34 @@ def sanitize_for_rendering(text):
     # Then, decode it back into a clean Python string.
     return text.encode('latin-1', 'ignore').decode('latin-1')
 
+# Bebas Neue only has Latin glyphs, so lines containing CJK text are drawn with
+# a fallback font that has them. Candidates are tried in order; the first that
+# exists on disk wins.
+_HANGUL_RE = re.compile(r'[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]')
+_KANA_RE = re.compile(r'[\u3040-\u30ff]')
+_HAN_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff]')
+_FALLBACK_FONTS = {
+    'hangul': ['assets/NotoSansKR-Regular.ttf', r'C:\Windows\Fonts\malgun.ttf'],
+    'kana': [r'C:\Windows\Fonts\YuGothB.ttc', r'C:\Windows\Fonts\msgothic.ttc', 'assets/NotoSansKR-Regular.ttf'],
+    'han': [r'C:\Windows\Fonts\msyh.ttc', r'C:\Windows\Fonts\simsun.ttc', 'assets/NotoSansKR-Regular.ttf'],
+}
+
+
+def get_font_for_text(text):
+    """
+    Returns the font file to render `text` with: the default Bebas font for
+    Latin text, or a CJK-capable fallback when the text has Hangul/kana/Han.
+    """
+    if _HANGUL_RE.search(text): script = 'hangul'
+    elif _KANA_RE.search(text): script = 'kana'
+    elif _HAN_RE.search(text): script = 'han'
+    else: return FONT_FILE
+    for path in _FALLBACK_FONTS[script]:
+        if os.path.exists(path):
+            return path
+    print(f"  [WARNING] No installed font found for {script} text; it will be stripped.")
+    return FONT_FILE
+
 def check_nvenc_support():
     startupinfo = None
     if sys.platform == "win32":
@@ -729,12 +757,16 @@ def enforce_visual_line_limit(grouped_cues, font_file, font_size, max_width, max
     """
     print("\n--- Enforcing 6-Visual-Line Limit ---")
     
-    # Load the font once for efficiency
-    try:
-        font = ImageFont.truetype(font_file, font_size)
-    except IOError:
-        font = ImageFont.load_default()
-        
+    # Cache loaded fonts; each cue is measured with the font it will be drawn in
+    font_cache = {}
+    def load_font(path):
+        if path not in font_cache:
+            try:
+                font_cache[path] = ImageFont.truetype(path, font_size)
+            except IOError:
+                font_cache[path] = ImageFont.load_default()
+        return font_cache[path]
+
     final_cues = []
     # Create a "to-do" list that we can add to while we're processing it
     cues_to_process = list(grouped_cues)
@@ -745,7 +777,8 @@ def enforce_visual_line_limit(grouped_cues, font_file, font_size, max_width, max
         cue = cues_to_process.pop(0)
         
         # Get the wrapped text to determine the final visual line count
-        wrapped_text = _wrap_text_advanced(cue['text'], font, max_width)
+        cue_font = load_font(get_font_for_text(cue['text']))
+        wrapped_text = _wrap_text_advanced(cue['text'], cue_font, max_width)
         num_visual_lines = wrapped_text.count('\n') + 1
         
         # If the cue is within the limit, it's approved. Add it to our final list.
@@ -910,13 +943,15 @@ def generate_video(audio_path, vocal_track_path, background_path, timed_cues_wit
         duration = end - start
         if duration <= 0: continue
 
-        sanitized_text = sanitize_for_rendering(text)
+        line_font = get_font_for_text(text)
+        # Only strip unrenderable characters when we're stuck with the Latin-only font.
+        sanitized_text = sanitize_for_rendering(text) if line_font == FONT_FILE else text
         if not sanitized_text.strip():
             print(f"  [SKIPPING] Line was fully unrenderable: '{text.replace(chr(10), ' ')}'")
             continue
-        
+
         try:
-            lyric_pil_img = create_blurred_text_image(text=sanitized_text, font_file=FONT_FILE, font_size=FONT_SIZE, text_color=TEXT_COLOR, shadow_color=SHADOW_COLOR, shadow_offset=SHADOW_OFFSET, blur_radius=SHADOW_BLUR_RADIUS, max_width=max_text_width)
+            lyric_pil_img = create_blurred_text_image(text=sanitized_text, font_file=line_font, font_size=FONT_SIZE, text_color=TEXT_COLOR, shadow_color=SHADOW_COLOR, shadow_offset=SHADOW_OFFSET, blur_radius=SHADOW_BLUR_RADIUS, max_width=max_text_width)
             final_lyric_clip = ImageClip(np.array(lyric_pil_img))
         except Exception as e:
             print(f"  [WARNING] Could not create text clip for '{sanitized_text.replace(chr(10), ' ')}...'. Error: {e}")
