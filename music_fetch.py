@@ -1115,22 +1115,34 @@ def _generate_background_image_with_model(output_path, model_name, model_id):
     print("\n--- Upscaling Background Image for Maximum Quality ---")
     import torch
     use_cuda = torch.cuda.is_available()
-    # Tiling bounds VRAM use (whole 1536x864 frame at 4x in fp32 needs many GB);
-    # fp16 on CUDA roughly halves memory and speeds inference up considerably.
+    # fp16 on CUDA is much faster and uses about half the memory, with no visible
+    # quality difference. The frame is processed in ONE pass (no tiling) so there
+    # can be no tile seams; tiling with a wide overlap is only an out-of-memory fallback.
     global _BG_UPSAMPLER
     if _BG_UPSAMPLER is None:
         model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-        _BG_UPSAMPLER = RealESRGANer(scale=4, model_path='https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth', model=model, tile=512 if use_cuda else 256, tile_pad=16, half=use_cuda)
+        _BG_UPSAMPLER = RealESRGANer(scale=4, model_path='https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth', model=model, tile=0, half=use_cuda)
     upsampler = _BG_UPSAMPLER
     img = cv2.imread(output_path, cv2.IMREAD_UNCHANGED)
     print("  Enhancing image...")
-    try:
-        # outscale=2 resizes the network's 4x output internally to 2x.
-        with torch.inference_mode():
-            final_image, _ = upsampler.enhance(img, outscale=2)
-    finally:
-        if use_cuda:
-            torch.cuda.empty_cache()
+    final_image = None
+    # (tile, tile_pad): untiled first, then progressively smaller tiles with generous overlap.
+    for tile, tile_pad in ((0, 0), (800, 64), (512, 64), (256, 48)):
+        upsampler.tile_size, upsampler.tile_pad = tile, tile_pad
+        try:
+            # outscale=2 resizes the network's 4x output internally to 2x.
+            with torch.inference_mode():
+                final_image, _ = upsampler.enhance(img, outscale=2)
+            break
+        except RuntimeError as e:
+            if "out of memory" not in str(e).lower() or not use_cuda:
+                raise
+            print(f"  -> GPU out of memory (tile={tile}); retrying with smaller tiles...")
+        finally:
+            if use_cuda:
+                torch.cuda.empty_cache()
+    if final_image is None:
+        raise Exception("Upscaling failed: out of GPU memory at every tile size.")
     cv2.imwrite(output_path, final_image)
     print(f"  -> SUCCESS: Final high-resolution image saved. New resolution: {final_image.shape[1]}x{final_image.shape[0]}")
     return True
