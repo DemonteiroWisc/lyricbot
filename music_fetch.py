@@ -1065,6 +1065,9 @@ BACKGROUND_MODELS = [
 ]
 
 
+_BG_UPSAMPLER = None
+
+
 def _generate_background_image_with_model(output_path, model_name, model_id):
     """Runs one Leonardo generation + upscale attempt with the given model. Returns True on success."""
     base_prompts = [
@@ -1110,14 +1113,24 @@ def _generate_background_image_with_model(output_path, model_name, model_id):
         raise Exception(f"Job timed out or failed to generate image URL ({model_name}).")
 
     print("\n--- Upscaling Background Image for Maximum Quality ---")
-    model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-    upsampler = RealESRGANer(scale=4, model_path='https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth', model=model, tile=0, half=False)
+    import torch
+    use_cuda = torch.cuda.is_available()
+    # Tiling bounds VRAM use (whole 1536x864 frame at 4x in fp32 needs many GB);
+    # fp16 on CUDA roughly halves memory and speeds inference up considerably.
+    global _BG_UPSAMPLER
+    if _BG_UPSAMPLER is None:
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+        _BG_UPSAMPLER = RealESRGANer(scale=4, model_path='https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth', model=model, tile=512 if use_cuda else 256, tile_pad=16, half=use_cuda)
+    upsampler = _BG_UPSAMPLER
     img = cv2.imread(output_path, cv2.IMREAD_UNCHANGED)
-    original_height, original_width = img.shape[:2]
     print("  Enhancing image...")
-    output, _ = upsampler.enhance(img, outscale=4)
-    target_width = original_width * 2; target_height = original_height * 2
-    final_image = cv2.resize(output, (target_width, target_height), interpolation=cv2.INTER_AREA)
+    try:
+        # outscale=2 resizes the network's 4x output internally to 2x.
+        with torch.inference_mode():
+            final_image, _ = upsampler.enhance(img, outscale=2)
+    finally:
+        if use_cuda:
+            torch.cuda.empty_cache()
     cv2.imwrite(output_path, final_image)
     print(f"  -> SUCCESS: Final high-resolution image saved. New resolution: {final_image.shape[1]}x{final_image.shape[0]}")
     return True
